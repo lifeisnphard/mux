@@ -1712,7 +1712,7 @@
     "ins": "_tex_3",
     "toml": "_config",
     "twig": "_twig",
-    "ts": "_typescript_1",
+    "ts": "_typescript",
     "spec.ts": "_typescript_1",
     "test.ts": "_typescript_1",
     "vala": "_vala",
