@@ -1,51 +1,140 @@
 import MarkdownIt from "markdown-it";
 
-/**
- * Extract the content under a heading titled "Mode: <mode>" (case-insensitive).
- * - Matches any heading level (#..######)
- * - Returns raw markdown content between this heading and the next heading
- *   of the same or higher level in the same document
- * - If multiple sections match, the first one wins
- * - The heading line itself is excluded from the returned content
- */
-export function extractModeSection(markdown: string, mode: string): string | null {
-  if (!markdown || !mode) return null;
+type HeadingMatcher = (headingText: string, level: number) => boolean;
 
+interface SectionBounds {
+  headingStartLine: number;
+  contentStartLine: number;
+  endLine: number;
+  level: number;
+}
+
+function collectSectionBounds(
+  markdown: string,
+  headingMatcher: HeadingMatcher
+): { bounds: SectionBounds[]; lines: string[] } {
+  const lines = markdown.split(/\r?\n/);
   const md = new MarkdownIt({ html: false, linkify: false, typographer: false });
   const tokens = md.parse(markdown, {});
-  const lines = markdown.split(/\r?\n/);
-  const target = `mode: ${mode}`.toLowerCase();
+  const bounds: SectionBounds[] = [];
 
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t.type !== "heading_open") continue;
+    const token = tokens[i];
+    if (token.type !== "heading_open") continue;
 
-    const level = Number(t.tag?.replace(/^h/, "")) || 1;
+    const level = Number(token.tag?.replace(/^h/, "")) || 1;
     const inline = tokens[i + 1];
     if (inline?.type !== "inline") continue;
 
-    const text = (inline.content || "").trim().toLowerCase();
-    if (text !== target) continue;
+    const headingText = (inline.content || "").trim();
+    if (!headingMatcher(headingText, level)) continue;
 
-    // Start content after the heading block ends
-    const headingEndLine = inline.map?.[1] ?? t.map?.[1] ?? (t.map?.[0] ?? 0) + 1;
+    const headingStartLine = token.map?.[0] ?? 0;
+    const headingEndLine = inline.map?.[1] ?? token.map?.[1] ?? headingStartLine + 1;
 
-    // Find the next heading of same or higher level to bound the section
-    let endLine = lines.length; // exclusive
+    let endLine = lines.length;
     for (let j = i + 1; j < tokens.length; j++) {
-      const tt = tokens[j];
-      if (tt.type === "heading_open") {
-        const nextLevel = Number(tt.tag?.replace(/^h/, "")) || 1;
+      const nextToken = tokens[j];
+      if (nextToken.type === "heading_open") {
+        const nextLevel = Number(nextToken.tag?.replace(/^h/, "")) || 1;
         if (nextLevel <= level) {
-          endLine = tt.map?.[0] ?? endLine;
+          endLine = nextToken.map?.[0] ?? endLine;
           break;
         }
       }
     }
 
-    const slice = lines.slice(headingEndLine, endLine).join("\n").trim();
-    return slice.length > 0 ? slice : null;
+    bounds.push({ headingStartLine, contentStartLine: headingEndLine, endLine, level });
   }
 
-  return null;
+  return { bounds, lines };
+}
+
+function extractSectionByHeading(markdown: string, headingMatcher: HeadingMatcher): string | null {
+  if (!markdown) return null;
+
+  const { bounds, lines } = collectSectionBounds(markdown, headingMatcher);
+  if (bounds.length === 0) return null;
+
+  const { contentStartLine, endLine } = bounds[0];
+  const slice = lines.slice(contentStartLine, endLine).join("\n").trim();
+  return slice.length > 0 ? slice : null;
+}
+
+function removeSectionsByHeading(markdown: string, headingMatcher: HeadingMatcher): string {
+  if (!markdown) return markdown;
+
+  const { bounds, lines } = collectSectionBounds(markdown, headingMatcher);
+  if (bounds.length === 0) return markdown;
+
+  const updatedLines = [...lines];
+  const sortedBounds = [...bounds].sort((a, b) => b.headingStartLine - a.headingStartLine);
+  for (const { headingStartLine, endLine } of sortedBounds) {
+    updatedLines.splice(headingStartLine, endLine - headingStartLine);
+  }
+
+  return updatedLines.join("\n");
+}
+
+/**
+ * Extract the content under a heading titled "Mode: <mode>" (case-insensitive).
+ */
+export function extractModeSection(markdown: string, mode: string): string | null {
+  if (!markdown || !mode) return null;
+
+  const expectedHeading = `mode: ${mode}`.toLowerCase();
+  return extractSectionByHeading(
+    markdown,
+    (headingText) => headingText.toLowerCase() === expectedHeading
+  );
+}
+
+/**
+ * Extract the first section whose heading matches "Model: <regex>" and whose regex matches
+ * the provided model identifier. Matching is case-insensitive by default unless the regex
+ * heading explicitly specifies flags via /pattern/flags syntax.
+ */
+
+export function extractModelSection(markdown: string, modelId: string): string | null {
+  if (!markdown || !modelId) return null;
+
+  const headingPattern = /^model:\s*(.+)$/i;
+
+  const compileRegex = (pattern: string): RegExp | null => {
+    const trimmed = pattern.trim();
+    if (!trimmed) return null;
+
+    if (trimmed.startsWith("/") && trimmed.lastIndexOf("/") > 0) {
+      const lastSlash = trimmed.lastIndexOf("/");
+      const source = trimmed.slice(1, lastSlash);
+      const flags = trimmed.slice(lastSlash + 1);
+      try {
+        return new RegExp(source, flags || undefined);
+      } catch {
+        return null;
+      }
+    }
+
+    try {
+      return new RegExp(trimmed, "i");
+    } catch {
+      return null;
+    }
+  };
+
+  return extractSectionByHeading(markdown, (headingText) => {
+    const match = headingPattern.exec(headingText);
+    if (!match) return false;
+    const regex = compileRegex(match[1] ?? "");
+    return Boolean(regex?.test(modelId));
+  });
+}
+
+export function stripScopedInstructionSections(markdown: string): string {
+  if (!markdown) return markdown;
+
+  return removeSectionsByHeading(markdown, (headingText) => {
+    const normalized = headingText.trim().toLowerCase();
+    return normalized.startsWith("mode:") || normalized.startsWith("model:");
+  });
 }
